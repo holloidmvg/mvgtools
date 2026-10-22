@@ -13,13 +13,18 @@ Either way logs land in ~/gui/log, whatever the software's own directory.
 
 usage: holo_service.py {status,stop,restart} [--style old|new] [--home DIR] [--timeout S]
        holo_service.py filesync [--home DIR] [--force]   # write a GCS-only /etc/holloid/filesync.json
+       holo_service.py install [--no-server|--with-server] [--full [--https]] [--stale-ui] [-- INSTALLER ARGS]
+                                # install ~/gui_new as checked out: its UI and bridge, then restart
 
 Uses only the standard library so it runs on the device's system python.
 Run as root or a sudoer: systemctl and journalctl are called through sudo
-when needed.
+when needed. Run `install` as the device user, not under sudo: only the
+installer gets sudo, and with --full it keeps the forwarded ssh agent (`ssh -A`)
+for git.
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import pwd
@@ -47,6 +52,15 @@ NGINX_PORT = 80
 FILESYNC_CONFIG = "/etc/holloid/filesync.json"
 GCS_BROKER_HOST = "10.77.0.3"
 GCS_BROKER_PORT = 5672
+
+# What install_device.sh links a new-ui device to, and where it keeps the link
+# once written. With --no-server it neither writes nor checks one.
+INSTALLER = "remote/deploy/install_device.sh"
+UPLINK_CONF = "/opt/holloid/cloud.conf"
+SERVER_HOST = "10.77.0.17"
+SERVER_PORT = 8883
+VPN_CONFIGS = ["/etc/openvpn/client/*.conf", "/etc/openvpn/*.conf"]
+DEVICE_CONFIG = "/etc/holloid/configuration.json"
 
 # The device API must answer this many checks in a row, without a restart in
 # between, before the start counts. A config error often lets the process come
@@ -398,7 +412,12 @@ def start(layout, timeout_s):
         else:
             info("%s started, waiting for it to come up..." % unit)
 
-    checks = checks_for(layout, restarts_before)
+    return verify(layout, checks_for(layout, restarts_before), timeout_s, started_at), started_at
+
+
+def verify(layout, checks, timeout_s, started_at):
+    """Wait for the checks, then say whether the software and the hardware came up,
+    or diagnose why not."""
     success = wait_for(checks, timeout_s)
 
     heading("Result")
@@ -410,12 +429,12 @@ def start(layout, timeout_s):
         path, lines = hardware_failure(layout, started_at)
         if path is None:
             print("\n" + color("Started: every check passed %d times in a row." % STABLE_CHECKS, "1;32"))
-            return True, started_at
+            return True
         print("\n" + color("Started, but the hardware did not initialise: the device API is up, "
                            "the hardware is not.", "1;33"))
         summarize(lines, os.path.basename(path))
         print("\nFull log: %s" % path)
-        return False, started_at
+        return False
 
     print("\n" + color("Start FAILED after %ds." % timeout_s, "1;31"))
     failed_units = []
@@ -423,7 +442,7 @@ def start(layout, timeout_s):
         if not check.passed and check.unit and check.unit not in failed_units:
             failed_units.append(check.unit)
     diagnose(layout, failed_units, started_at)
-    return False, started_at
+    return False
 
 
 # --- diagnosis ------------------------------------------------------------------
@@ -697,11 +716,205 @@ def install_filesync(home, force=False):
     return True
 
 
+# --- install --------------------------------------------------------------------
+
+def as_user(user, cmd):
+    """cmd run as user, keeping the forwarded ssh agent so git can use it."""
+    if pwd.getpwuid(os.geteuid()).pw_name == user:
+        return cmd
+    return ["sudo", "-u", user, "--preserve-env=SSH_AUTH_SOCK"] + cmd
+
+
+def as_root(cmd):
+    return cmd if os.geteuid() == 0 else ["sudo", "--preserve-env=SSH_AUTH_SOCK"] + cmd
+
+
+def read_file(path):
+    """The file's text, through sudo when it is not ours to read; None when missing."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()
+    except PermissionError:
+        return run(["cat", path]).stdout
+
+
+def saved_server(text):
+    """(host, port) of the server link in install_device.sh's cloud.conf, or None
+    when the text holds no link (a device installed --no-server)."""
+    if not text or not re.search(r"^connection ", text, re.MULTILINE):
+        return None
+    match = re.search(r"^address\s+(\S+)", text, re.MULTILINE)
+    if not match:
+        return None
+    host, _, port = match.group(1).partition(":")
+    return host, int(port) if port.isdigit() else SERVER_PORT
+
+
+def no_server_reason():
+    """Why the installer should get --no-server, or None when the server answers.
+
+    Without it, the installer ends by waiting for the server to accept the link
+    and fails when it does not, as on a device with the VPN down."""
+    if not any(glob.glob(pattern) for pattern in VPN_CONFIGS):
+        return "no OpenVPN config under /etc/openvpn, so nothing to link to the server with"
+    server = saved_server(read_file(UPLINK_CONF)) or (SERVER_HOST, SERVER_PORT)
+    if port_open(server[1], server[0]):
+        return None
+    return "the server %s:%d does not answer (VPN down?)" % server
+
+
+# What vite.config.ts hashes into remote/ui/dist/.src-stamp when it builds the UI
+# (remote/ui/src/lib/srcStamp.ts): this must stay the same algorithm.
+UI_NOT_SHIPPED = re.compile(r"\.(test|cases)\.[a-z]+$")
+UI_OUTSIDE_SRC = ["index.html", "vite.config.ts", "package.json", "package-lock.json", ".env"]
+
+
+def ui_stamp(ui_root):
+    """The hash of the UI source the way the build stamps it into dist."""
+    src = os.path.join(ui_root, "src")
+    inputs = sorted(os.path.join(d, name) for d, _, names in os.walk(src) for name in names)
+    inputs = [path for path in inputs if not UI_NOT_SHIPPED.search(path)]
+    inputs += [os.path.join(ui_root, name) for name in UI_OUTSIDE_SRC]
+    digest = hashlib.sha256()
+    for path in inputs:
+        if not os.path.exists(path):
+            continue
+        digest.update(os.path.relpath(path, ui_root).replace("\\", "/").encode())
+        with open(path, encoding="utf-8", errors="replace", newline="") as f:
+            digest.update(f.read().replace("\r\n", "\n").encode())
+    return digest.hexdigest()
+
+
+def check_ui_bundle(gui_dir):
+    """Say whether the committed UI bundle, which is what the installer serves,
+    was built from this checkout's UI source. False only when it was not."""
+    ui_root = os.path.join(gui_dir, "remote", "ui")
+    dist = os.path.join(ui_root, "dist")
+    if not os.path.exists(os.path.join(dist, "index.html")):
+        info(color("no UI bundle in remote/ui/dist: the installer builds one if this device has npm, "
+                   "and fails if not", "33"))
+        return True
+    try:
+        with open(os.path.join(dist, ".src-stamp")) as f:
+            built_from = f.read().strip()
+    except OSError:
+        info(color("remote/ui/dist has no .src-stamp, so whether it matches remote/ui/src is unknown", "33"))
+        return True
+    if built_from != ui_stamp(ui_root):
+        bad("remote/ui/dist was not built from this checkout's remote/ui/src: the device would serve "
+            "the UI of an older build. Run `npm run build` in remote/ui and commit dist, "
+            "or pass --stale-ui to install it anyway")
+        return False
+    ok("remote/ui/dist was built from this checkout's remote/ui/src")
+    return True
+
+
+def git_out(owner, gui_dir, *args):
+    proc = subprocess.run(as_user(owner, ["git", "-C", gui_dir] + list(args)),
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def describe_checkout(gui_dir, owner):
+    """Print what is about to be installed; returns the branch, None when HEAD is detached."""
+    branch = git_out(owner, gui_dir, "rev-parse", "--abbrev-ref", "HEAD")
+    head = git_out(owner, gui_dir, "log", "-1", "--format=%h %s")
+    changed = git_out(owner, gui_dir, "status", "--porcelain", "--untracked-files=no")
+    info("%s: %s, at %s" % (gui_dir, "detached HEAD" if branch == "HEAD" else "branch " + str(branch), head))
+    if changed:
+        info(color("%d uncommitted change(s), installed as they are" % len(changed.splitlines()), "33"))
+    return None if branch == "HEAD" else branch
+
+
+def install_command(gui_dir, owner, server, extra, branch=None, https=False):
+    cmd = [os.path.join(gui_dir, INSTALLER), "--gui-dir", gui_dir, "--gui-user", owner, "--headless"]
+    if branch:
+        cmd += ["--branch", branch]
+        if https:
+            cmd.append("--https")
+    if not server:
+        cmd.append("--no-server")
+    return as_root(cmd + extra)
+
+
+def install(home, server, full, https, stale_ui, extra, timeout_s):
+    owner = pwd.getpwuid(os.stat(home).st_uid).pw_name
+    gui_dir = os.path.join(home, "gui_new")
+
+    heading("Before installing")
+    if not os.path.exists(os.path.join(gui_dir, INSTALLER)):
+        bad("no checkout with %s in %s: clone the branch there first" % (INSTALLER, gui_dir))
+        return 1
+    branch = describe_checkout(gui_dir, owner)
+    if not full and not os.path.exists(os.path.join(gui_dir, "venv", "bin", "python")):
+        bad("%s has no venv, so the device software was never installed from it: pass --full" % gui_dir)
+        return 1
+    if full:
+        if branch is None:
+            bad("--full needs a branch checked out: the installer checks it out again by name")
+            return 1
+        behind = git_out(owner, gui_dir, "rev-list", "--count", "HEAD..@{u}")
+        info(color("--full: the installer fetches and fast-forwards %s to origin/%s if that is ahead%s"
+                   % (branch, branch, " (it already is, by %s commit(s))" % behind if behind not in (None, "0")
+                      else ""), "33"))
+        if not https and not os.environ.get("SSH_AUTH_SOCK"):
+            info(color("no forwarded ssh agent: the installer's git needs a key of %s's own "
+                       "(else log in with `ssh -A`)" % owner, "33"))
+    if not check_ui_bundle(gui_dir) and not stale_ui:
+        return 1
+    for path, consequence in ((DEVICE_CONFIG, "the device software raises on startup without it"),
+                              (FILESYNC_CONFIG, "the device software will not start; `filesync` writes one")):
+        if read_file(path) is None:
+            bad("no %s: %s" % (path, consequence))
+    if server is None:
+        reason = no_server_reason()
+        server = reason is None
+        info("server link: " + ("the server answers, so the install ends by checking the link" if server
+                                else color("--no-server, because " + reason, "33")))
+
+    cmd = install_command(gui_dir, owner, server, extra, branch if full else None, https)
+    heading("install_device.sh")
+    info("$ " + " ".join(cmd))
+    print(flush=True)
+    started_at = time.time()
+    code = subprocess.run(cmd, cwd=gui_dir).returncode
+
+    layout = Layout("new", home, [])
+    if code != 0:
+        print("\n" + color("install_device.sh FAILED (exit %d); its last FAIL line above names the step."
+                           % code, "1;31"))
+        if server:
+            info("if that was the server link check (uplink reads 0): `install --no-server` skips it")
+        props = unit_props(layout.device_unit)
+        if full and props["LoadState"] == "loaded" and props["ActiveState"] != "active":
+            diagnose(layout, [layout.device_unit], started_at)
+        return code
+    if read_file(FILESYNC_CONFIG) is None:
+        info("no %s, so the device software stays stopped; nothing more to check" % FILESYNC_CONFIG)
+        return 0
+
+    if full:
+        # The installer started the device software and waited only for its API;
+        # whether the hardware came up is in the log.
+        heading("Checking the start")
+        restarts_before = dict((unit, unit_props(unit)["NRestarts"]) for unit in layout.units)
+        return 0 if verify(layout, checks_for(layout, restarts_before), timeout_s, started_at) else 1
+    # Without --branch the installer leaves the device software running as it
+    # was, on the Python it loaded at its last start.
+    if not stop(layout):
+        bad("not starting: the old processes are still there, and two copies must never drive the hardware")
+        return 1
+    success, _ = start(layout, timeout_s)
+    return 0 if success else 1
+
+
 # --- main -----------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("action", choices=["status", "stop", "restart", "filesync"])
+    parser.add_argument("action", choices=["status", "stop", "restart", "filesync", "install"])
     parser.add_argument("--style", choices=["old", "new"],
                         help="skip detection and treat the device as this version")
     parser.add_argument("--home", default=DEFAULT_HOME, help="home of the device user (default %(default)s)")
@@ -709,11 +922,28 @@ def main():
                         help="seconds to wait for a start to settle (default %(default)s)")
     parser.add_argument("--force", action="store_true",
                         help="filesync: replace an existing %s" % FILESYNC_CONFIG)
-    args = parser.parse_args()
+    server = parser.add_mutually_exclusive_group()
+    server.add_argument("--no-server", dest="server", action="store_false", default=None,
+                        help="install: pass --no-server (default: only when the server does not answer)")
+    server.add_argument("--with-server", dest="server", action="store_true",
+                        help="install: never pass --no-server")
+    parser.add_argument("--full", action="store_true",
+                        help="install: the device software too (venv, packages, unit); needs git access")
+    parser.add_argument("--https", action="store_true", help="install --full: fetch over https")
+    parser.add_argument("--stale-ui", action="store_true",
+                        help="install: go ahead when remote/ui/dist was built from other source")
+    args, extra = parser.parse_known_args()
+    if extra[:1] == ["--"]:
+        extra = extra[1:]
+    if extra and args.action != "install":
+        parser.error("unrecognized arguments: %s" % " ".join(extra))
 
     # Both versions read the same file, so this needs no detection.
     if args.action == "filesync":
         return 0 if install_filesync(args.home, args.force) else 1
+    # The installer stops whichever version runs today itself.
+    if args.action == "install":
+        return install(args.home, args.server, args.full, args.https, args.stale_ui, extra, args.timeout)
 
     heading("Detecting version")
     style, evidence = detect(args.home)

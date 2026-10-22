@@ -89,5 +89,69 @@ class Diagnosis(unittest.TestCase):
         self.assertEqual(failures[0].exception, "KeyError: 'pins'")
 
 
+class Install(unittest.TestCase):
+    def test_saved_server(self):
+        conf = "connection uplink\naddress 10.77.0.42:9883\ntopic holloid/# both 1\n"
+        self.assertEqual(hs.saved_server(conf), ("10.77.0.42", 9883))
+        self.assertEqual(hs.saved_server("connection uplink\naddress 10.77.0.42\n"), ("10.77.0.42", hs.SERVER_PORT))
+        self.assertIsNone(hs.saved_server(None))
+        self.assertIsNone(hs.saved_server("# left unset (--no-server)\n"))
+
+    def test_command_leaves_the_checkout_alone(self):
+        with mock.patch.object(hs.os, "geteuid", return_value=1000):
+            cmd = hs.install_command("/home/mage/gui_new", "mage", True, [])
+        self.assertEqual(cmd, ["sudo", "--preserve-env=SSH_AUTH_SOCK", "/home/mage/gui_new/remote/deploy/install_device.sh",
+                               "--gui-dir", "/home/mage/gui_new", "--gui-user", "mage", "--headless"])
+        with mock.patch.object(hs.os, "geteuid", return_value=0):
+            cmd = hs.install_command("/home/mage/gui_new", "mage", False, ["--rename"], branch="fix-x", https=True)
+        self.assertEqual(cmd[0], "/home/mage/gui_new/remote/deploy/install_device.sh")
+        self.assertEqual(cmd[-6:], ["--headless", "--branch", "fix-x", "--https", "--no-server", "--rename"])
+
+    def test_no_server_when_the_server_does_not_answer(self):
+        with mock.patch.object(hs.glob, "glob", return_value=["/etc/openvpn/client/hm-2p99.conf"]), \
+                mock.patch.object(hs, "read_file", return_value="connection uplink\naddress 10.77.0.42:8883\n"), \
+                mock.patch.object(hs, "port_open", return_value=False) as probe:
+            self.assertIn("10.77.0.42:8883 does not answer", hs.no_server_reason())
+        probe.assert_called_with(8883, "10.77.0.42")
+        with mock.patch.object(hs.glob, "glob", return_value=["/etc/openvpn/client/hm-2p99.conf"]), \
+                mock.patch.object(hs, "read_file", return_value=None), \
+                mock.patch.object(hs, "port_open", return_value=True) as probe:
+            self.assertIsNone(hs.no_server_reason())
+        probe.assert_called_with(hs.SERVER_PORT, hs.SERVER_HOST)
+        with mock.patch.object(hs.glob, "glob", return_value=[]):
+            self.assertIn("no OpenVPN config", hs.no_server_reason())
+
+
+class UiStamp(unittest.TestCase):
+    # ui_stamp also gave the stamp the vite build wrote for holo-control 8949f3b7,
+    # checked by hand: these only pin down what it hashes.
+    def ui(self, tmp, files):
+        for rel, text in files.items():
+            path = os.path.join(tmp, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", newline="") as f:
+                f.write(text)
+        return tmp
+
+    def test_line_endings_and_tests_do_not_count(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            self.ui(a, {"src/App.tsx": "x\n", "src/lib/y.ts": "y\n", "index.html": "<html>\n"})
+            self.ui(b, {"src/App.tsx": "x\r\n", "src/lib/y.ts": "y\n", "index.html": "<html>\n",
+                        "src/lib/y.test.ts": "t\n", "src/lib/y.cases.ts": "c\n"})
+            self.assertEqual(hs.ui_stamp(a), hs.ui_stamp(b))
+            self.ui(b, {"src/lib/y.ts": "changed\n"})
+            self.assertNotEqual(hs.ui_stamp(a), hs.ui_stamp(b))
+
+    def test_stale_bundle_is_refused(self):
+        with tempfile.TemporaryDirectory() as gui:
+            ui = os.path.join(gui, "remote", "ui")
+            self.ui(ui, {"src/App.tsx": "x\n", "dist/index.html": "<html>\n"})
+            self.ui(ui, {"dist/.src-stamp": hs.ui_stamp(ui)})
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(hs.check_ui_bundle(gui))
+                self.ui(ui, {"src/App.tsx": "edited, not rebuilt\n"})
+                self.assertFalse(hs.check_ui_bundle(gui))
+
+
 if __name__ == "__main__":
     unittest.main()
