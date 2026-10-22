@@ -64,6 +64,9 @@ BROKER_NOISE = re.compile(r"pika|AMQP|ACCESS_REFUSED|AuthenticationError|gcs_bro
 # Where the device software says in its own words which phase went wrong.
 LANDMARK = re.compile(r"Init hardware exception|Hardware Init failed|Device stopped with an error"
                       r"|Device API did not start")
+# What the device software logs when the hardware did not come up, even though
+# the software itself (and its device API) carries on.
+HARDWARE_FAILED = re.compile(r"Hardware Init failed|Init hardware exception")
 # What a component that was never created looks like once the code reaches for
 # it: almost always a consequence of an earlier failure, not a cause.
 FOLLOW_ON = re.compile(r"'NoneType' object (has no attribute|is not iterable|is not subscriptable)")
@@ -402,8 +405,17 @@ def start(layout, timeout_s):
     for check in checks:
         (ok if check.passed else bad)("%-22s %s" % (check.name, check.detail))
     if success:
-        print("\n" + color("Started: every check passed %d times in a row." % STABLE_CHECKS, "1;32"))
-        return True, started_at
+        # The device API comes up even when the hardware does not, so passing
+        # checks only mean the software runs; the log says whether the hardware does.
+        path, lines = hardware_failure(layout, started_at)
+        if path is None:
+            print("\n" + color("Started: every check passed %d times in a row." % STABLE_CHECKS, "1;32"))
+            return True, started_at
+        print("\n" + color("Started, but the hardware did not initialise: the device API is up, "
+                           "the hardware is not.", "1;33"))
+        summarize(lines, os.path.basename(path))
+        print("\nFull log: %s" % path)
+        return False, started_at
 
     print("\n" + color("Start FAILED after %ds." % timeout_s, "1;31"))
     failed_units = []
@@ -425,6 +437,18 @@ def journal(unit, since, lines=40):
 def newest_log(log_dir, since):
     logs = [p for p in glob.glob(os.path.join(log_dir, "log_*.log*")) if os.path.getmtime(p) >= since - 2]
     return max(logs, key=os.path.getmtime) if logs else None
+
+
+def hardware_failure(layout, since):
+    """The device log written since the start and its lines, if it reports that
+    the hardware did not initialise; (None, None) otherwise."""
+    path = newest_log(layout.log_dir, since)
+    if path is None:
+        return None, None
+    lines = read_tail(path, 20000)
+    if any(HARDWARE_FAILED.search(line) for line in lines):
+        return path, lines
+    return None, None
 
 
 def read_tail(path, lines):

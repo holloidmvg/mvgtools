@@ -1,0 +1,24 @@
+2026-10-22_13:14:22.980 INFO device.py:1340 Init hardware: started
+2026-10-22_13:14:27.987 INFO pumpmc_core.py:275 igor: config request no reply
+2026-10-22_13:14:27.987 INFO device.py:2554 Status: Hardware Init failed
+2026-10-22_13:14:27.987 INFO device.py:2581 Sub Status:
+2026-10-22_13:14:27.990 WARNING device.py:1365 Init hardware exception -> Traceback (most recent call last):
+  File "/home/mage/gui_new/client/device.py", line 1350, in init_hardware
+    self.q_init_devices(True)
+  File "/home/mage/gui_new/client/device.py", line 2056, in q_init_devices
+    self.components = comps.setup_components()
+                      ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mage/gui_new/hardware/components.py", line 56, in setup_components
+    components.create_from_config_file()
+  File "/home/mage/gui_new/hardware/component_core.py", line 73, in create_from_config_file
+    compobj = compclass(**comp)
+              ^^^^^^^^^^^^^^^^^
+  File "/home/mage/gui_new/hardware/pumpmc_stepper.py", line 77, in __init__
+    self.pump_id = self._igor.configure(config_request=config_request, **config_params)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mage/gui_new/hardware/pumpmc_core.py", line 276, in configure
+    raise RuntimeError("Unable to configure a pump")
+RuntimeError: Unable to configure a pump
+2026-10-22_13:14:27.995 WARNING device.py:1383 Device API is up, but the hardware is not: calls will report what is missing
+2026-10-22_13:14:27.995 INFO device.py:1368 Init hardware: finished
+2026-10-22_13:14:28.240 INFO device.py:1433 Starting Device RUN loop
