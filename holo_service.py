@@ -56,6 +56,22 @@ CHECK_INTERVAL_S = 2
 
 ERROR_LINE = re.compile(r"Traceback|Error|Exception|CRITICAL|FATAL|ERROR|failed", re.IGNORECASE)
 
+# Errors that never stop a start by themselves: the link to the GCS broker
+# (VPN or credentials) and its retries. They get a one-line note, not the headline.
+BROKER_NOISE = re.compile(r"pika|AMQP|ACCESS_REFUSED|AuthenticationError|gcs_broker|broker\.py"
+                          r"|connection_workflow|io_services_utils|blocking_connection"
+                          r"|while authenticating")
+# Where the device software says in its own words which phase went wrong.
+LANDMARK = re.compile(r"Init hardware exception|Hardware Init failed|Device stopped with an error"
+                      r"|Device API did not start")
+# What a component that was never created looks like once the code reaches for
+# it: almost always a consequence of an earlier failure, not a cause.
+FOLLOW_ON = re.compile(r"'NoneType' object (has no attribute|is not iterable|is not subscriptable)")
+LOG_PREFIX = re.compile(r"^\d{4}-\d\d-\d\d_(\d\d:\d\d:\d\d\.\d+) (?:DEBUG|INFO|WARNING|ERROR|CRITICAL) ")
+JOURNAL_PREFIX = re.compile(r"^\S+ \S+ [^\s:]+\[\d+\]: ")
+FRAME = re.compile(r'^\s*File "([^"]+)", line (\d+), in (\S+)')
+UNDERVOLTAGE = re.compile(r"undervoltage.*?(0x[0-9a-fA-F]+)")
+
 USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 
@@ -419,19 +435,137 @@ def read_tail(path, lines):
         return run(["tail", "-n", str(lines), path]).stdout.splitlines()
 
 
-def last_traceback(lines):
-    """The last 'Traceback ...' block through its exception line, if any."""
-    start = None
+class Failure:
+    """One traceback in a log, with the log line that announced it."""
+
+    def __init__(self, index, lines, context):
+        self.index = index
+        self.lines = lines
+        self.context = context
+        self.exception = lines[-1].strip()
+        frames = [line for line in lines if FRAME.match(line)]
+        # The frames of the first traceback only: with chained exceptions that
+        # is the root, and its innermost frame is where things went wrong.
+        self.frames = frames
+        match = LOG_PREFIX.match(context)
+        self.time = match.group(1) if match else None
+        self.noise = bool(BROKER_NOISE.search(context) or BROKER_NOISE.search(self.exception))
+        self.follow_on = bool(FOLLOW_ON.search(self.exception))
+
+    def phase(self):
+        """The announcing log line without its timestamp and level."""
+        return LOG_PREFIX.sub("", self.context).split("Traceback")[0].strip()
+
+
+def short_frame(line):
+    match = FRAME.match(line)
+    path = "/".join(match.group(1).split("/")[-2:])
+    return "%s:%s in %s" % (path, match.group(2), match.group(3))
+
+
+def tracebacks(lines):
+    """Every traceback in the lines, oldest first; a chained exception
+    ('During handling ...', 'The above exception ...') joins the one before it
+    and keeps that one's exception, the root."""
+    found = []
+    i = 0
+    while i < len(lines):
+        if "Traceback (most recent call last)" not in lines[i]:
+            i += 1
+            continue
+        end = i + 1
+        while end < len(lines) and (lines[end].startswith((" ", "\t")) or not lines[end].strip()):
+            end += 1
+        block = lines[i:end + 1]
+        before = [line.strip() for line in lines[max(0, i - 3):i] if line.strip()]
+        previous = before[-1] if before else ""
+        if found and previous.startswith(("During handling", "The above exception")):
+            found[-1].lines += [previous] + block
+        elif lines[i].split("Traceback")[0].strip():
+            found.append(Failure(i, block, lines[i]))
+        else:
+            found.append(Failure(i, block, previous))
+        i = end + 1
+    return found
+
+
+def notes_for(lines, failures):
+    """One-liners for things worth knowing that did not stop the start."""
+    notes = []
+    if any("ACCESS_REFUSED" in line for line in lines):
+        notes.append("GCS broker refused the login (403): its credentials, not the network")
+    elif any(f.noise for f in failures):
+        notes.append("GCS broker connection errors (VPN or broker down)")
+    for line in lines:
+        match = UNDERVOLTAGE.search(line)
+        if match:
+            notes.append("supply undervoltage (vcgencmd %s): check the power supply" % match.group(1))
+            break
+    return notes
+
+
+def summarize(lines, source):
+    """Print the first real failure as the cause, what followed from it, and the
+    rest as notes. A crash cascades: the last traceback is the last domino."""
+    failures = tracebacks(lines)
+    real = [f for f in failures if not f.noise]
+    cause = next((f for f in real if not f.follow_on), real[0] if real else None)
+
+    print("\n" + color("--- Most likely cause (from %s) ---" % source, "1"))
+    if cause is None:
+        landmarks = [line for line in lines if LANDMARK.search(line)]
+        if landmarks:
+            info("no traceback, but the software reported:")
+            for line in landmarks[:5]:
+                info(color(LOG_PREFIX.sub("", line), "31"))
+        else:
+            info("no traceback or failure message found; see the log tails below")
+    else:
+        info("first failure%s%s" % (" at " + cause.time if cause.time else "",
+                                    ", in: " + cause.phase() if cause.phase() else ""))
+        for frame in cause.frames[-3:]:
+            info("  " + short_frame(frame))
+        info("  " + color(cause.exception, "1;31"))
+
+        later = [f for f in real if f.index > cause.index]
+        if later:
+            print("\n" + color("--- What followed ---", "1"))
+            for f in later:
+                where = " (%s)" % short_frame(f.frames[-1]) if f.frames else ""
+                info("%s%s%s" % (f.time + " " if f.time else "", f.exception, where))
+                if f.follow_on:
+                    info(color("    a component that was never created: follows from the cause above", "33"))
+
+    notes = notes_for(lines, failures)
+    if notes:
+        print("\n" + color("--- Also noticed (not why the start failed) ---", "1"))
+        for note in notes:
+            info(note)
+    return cause
+
+
+def error_lines(lines):
+    """The error lines without broker noise or bare 'Traceback' headers; each
+    traceback's exception line comes with its innermost frame, so it says where."""
+    failures = tracebacks(lines)
+    noisy = set()
+    innermost = {}
+    for f in failures:
+        span = range(f.index, f.index + len(f.lines))
+        if f.noise:
+            noisy.update(span)
+        elif f.frames:
+            innermost[f.index + len(f.lines) - 1] = f.frames[-1]
+    errors = []
     for i, line in enumerate(lines):
-        if "Traceback (most recent call last)" in line:
-            start = i
-    if start is None:
-        return []
-    end = start + 1
-    while end < len(lines) and (lines[end].startswith((" ", "\t")) or not lines[end].strip()
-                                or "Traceback" in lines[end] or "During handling" in lines[end]):
-        end += 1
-    return lines[start:end + 1]
+        if i in noisy or BROKER_NOISE.search(line) or line.strip() == "Traceback (most recent call last):":
+            continue
+        if i in innermost:
+            errors.append(innermost[i])
+            errors.append(line)
+        elif ERROR_LINE.search(line) and not line.startswith((" ", "\t")):
+            errors.append(line)
+    return errors
 
 
 def show(title, lines):
@@ -441,29 +575,37 @@ def show(title, lines):
 
 
 def diagnose(layout, units, since):
+    path = newest_log(layout.log_dir, since) if layout.device_unit in units else None
+    journals = {}
     for unit in units:
-        text = journal(unit, since)
-        lines = text.splitlines() if text else ["(no journal entries since the start)"]
-        tb = last_traceback(lines)
-        if tb:
-            show("%s: last traceback in the journal" % unit, tb)
-        show("journalctl -u %s (since start, last 40 lines)" % unit, lines)
+        text = journal(unit, since, lines=200)
+        journals[unit] = text.splitlines() if text else ["(no journal entries since the start)"]
 
-    if layout.device_unit in units:
-        path = newest_log(layout.log_dir, since)
-        if path is None:
-            show("device software log", ["no log file in %s written since the start: the software died "
-                                         "before it set up logging, so the journal above is all there is"
-                                         % layout.log_dir])
-        else:
-            lines = read_tail(path, 400)
-            tb = last_traceback(lines)
-            if tb:
-                show("%s: last traceback" % path, tb)
-            errors = [l for l in lines if ERROR_LINE.search(l)][-15:]
-            if errors:
-                show("%s: last error lines" % path, errors)
-            show("%s: last 25 lines" % path, lines[-25:])
+    # The device log tells the story best. Each start writes a fresh one, so
+    # read it whole: the cause is near the top, not in the tail.
+    if path is not None:
+        lines = read_tail(path, 20000)
+        summarize(lines, os.path.basename(path))
+    elif units:
+        summarize([JOURNAL_PREFIX.sub("", line) for line in journals[units[0]]], "journalctl -u %s" % units[0])
+
+    if path is not None:
+        cause = next((f for f in tracebacks(lines) if not f.noise and not f.follow_on), None)
+        if cause:
+            show("%s: the cause's full traceback" % path, [cause.context] + cause.lines[1:])
+        errors = error_lines(lines)[-15:]
+        if errors:
+            show("%s: last error lines (broker errors left out)" % path, errors)
+        show("%s: last 25 lines" % path, lines[-25:])
+    elif layout.device_unit in units:
+        show("device software log", ["no log file in %s written since the start: the software died "
+                                     "before it set up logging, so the journal is all there is"
+                                     % layout.log_dir])
+
+    # With a device log the journal is mostly startup chatter; without one it is all there is.
+    for unit in units:
+        count = 15 if path is not None else 40
+        show("journalctl -u %s (since start, last %d lines)" % (unit, count), journals[unit][-count:])
 
     print("\nMore: journalctl -u %s -n 200 --no-pager   |   ls -t %s | head"
           % (" -u ".join(units) or layout.device_unit, layout.log_dir))

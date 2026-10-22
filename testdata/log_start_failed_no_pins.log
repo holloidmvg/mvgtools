@@ -1,0 +1,57 @@
+2026-10-22_11:06:14.197 INFO startup.py:90 Startup: created queue 7fff6ad1e750
+2026-10-22_11:06:14.198 INFO broker.py:37 Broker: initialized
+2026-10-22_11:06:14.200 INFO connection_workflow.py:179 Pika version 1.3.2 connecting to ('10.77.0.3', 5672)
+2026-10-22_11:06:14.208 WARNING device.py:1235 No saved experiment configuration: one has to be set before a run.
+2026-10-22_11:06:14.209 INFO device.py:1340 Init hardware: started
+2026-10-22_11:06:14.216 INFO component_core.py:54 Creating components
+2026-10-22_11:06:14.218 INFO component_core.py:66 Creating pcb of type ComponentPCB_Rev1p4p1. [self-registered]
+2026-10-22_11:06:14.225 INFO components.py:238 Hardware: DAC found at address 0x60
+2026-10-22_11:06:14.254 INFO connection.py:2017 AMQP stack terminated, failed to connect, or aborted: opened=False, error-arg=None; pending-error=ConnectionClosedByBroker: (403) 'ACCESS_REFUSED - Login was refused using authentication mechanism PLAIN. For details see the broker logfile.'
+2026-10-22_11:06:14.255 ERROR connection.py:2052 Connection closed while authenticating indicating a probable authentication error
+2026-10-22_11:06:14.256 ERROR blocking_connection.py:457 Error in _create_connection().
+Traceback (most recent call last):
+  File "/usr/lib/python3/dist-packages/pika/adapters/blocking_connection.py", line 451, in _create_connection
+    raise self._reap_last_connection_workflow_error(error)
+pika.exceptions.ProbableAuthenticationError: ConnectionClosedByBroker: (403) 'ACCESS_REFUSED - Login was refused using authentication mechanism PLAIN. For details see the broker logfile.'
+2026-10-22_11:06:14.258 WARNING gcs_broker.py:183 [gcs] reply consumer failed: ConnectionClosedByBroker: (403) 'ACCESS_REFUSED - Login was refused using authentication mechanism PLAIN. For details see the broker logfile.'
+2026-10-22_11:06:14.260 INFO component_core.py:66 Creating pump_main of type ComponentPump_Igor. [self-registered]
+2026-10-22_11:06:14.443 INFO device.py:2554 Status: Hardware Init failed
+2026-10-22_11:06:14.448 WARNING device.py:1365 Init hardware exception -> Traceback (most recent call last):
+  File "/home/mage/gui_new/client/device.py", line 1346, in init_hardware
+    self.q_init_devices(True)
+  File "/home/mage/gui_new/client/device.py", line 2052, in q_init_devices
+    self.components = comps.setup_components()
+                      ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mage/gui_new/hardware/components.py", line 56, in setup_components
+    components.create_from_config_file()
+  File "/home/mage/gui_new/hardware/component_core.py", line 73, in create_from_config_file
+    compobj = compclass(**comp)
+              ^^^^^^^^^^^^^^^^^
+  File "/home/mage/gui_new/hardware/pumpmc_stepper.py", line 76, in __init__
+    self.pump_id = self._igor.configure(**config_params)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mage/gui_new/hardware/pumpmc_core.py", line 270, in configure
+    raise RuntimeError("A minimum of one pin must be specified")
+RuntimeError: A minimum of one pin must be specified
+
+2026-10-22_11:06:14.474 ERROR server.py:221 Unexpected Exception in publisher device_updates
+Traceback (most recent call last):
+  File "/home/mage/gui_new/client/device.py", line 626, in get_lasers_state
+    for index, laser in enumerate(self.lasers_rgb)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'NoneType' object is not iterable
+2026-10-22_11:06:14.481 WARNING device.py:1383 Device API is up, but the hardware is not: calls will report what is missing
+2026-10-22_11:06:14.481 WARNING server.py:223 Publisher device_updates has terminated
+2026-10-22_11:06:14.481 INFO device.py:1368 Init hardware: finished
+2026-10-22_11:06:14.731 INFO device.py:1433 Starting Device RUN loop
+2026-10-22_11:06:15.041 WARNING device.py:2653 Device: supply undervoltage, vcgencmd reports 0x50005
+2026-10-22_11:06:15.042 ERROR client_device.py:31 Device stopped with an error
+Traceback (most recent call last):
+  File "/home/mage/gui_new/client_device.py", line 29, in main
+    device.run_throwing()
+  File "/home/mage/gui_new/client/device.py", line 1456, in run_throwing
+    self.update_led_state()
+  File "/home/mage/gui_new/client/device.py", line 2614, in update_led_state
+    self.device_gui_state[gui_cc.LED_INDICATOR] = self.component_led.on
+                                                  ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'on'
