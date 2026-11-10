@@ -10,8 +10,8 @@ machine.
 
 These are tools for the Holloid device software (`holo-control`), kept apart
 from it. The remote is `git@github.com:holloidmvg/mvgtools.git`. The default branch
-is `main`, but the work happens on feature branches: as of 2026-11-10 that's
-`holo-service-diagnosis`, three commits ahead of `main` and not yet merged.
+is `main`. Work is done on feature branches, which are merged into `main`
+when the owner says so. `holo-service-diagnosis` was merged on 2026-11-10.
 Check `git branch -avv` before you commit. Pushing publishes to GitHub, so
 **ask before every push**.
 
