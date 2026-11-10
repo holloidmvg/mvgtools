@@ -49,9 +49,10 @@ These must stay in step with holo-control. When one of them changes there,
 
 - **Standard library only**, because `holo_service.py` runs on the device's
   system `python3`, outside any venv. It is a single file you can copy to a
-  device. Keep it that way. It avoids f-strings and uses
-  `universal_newlines=True` and `%` formatting. Keep that style for old device
-  Pythons, unless you have checked which Python the devices actually run.
+  device. Keep it that way. **The devices run Python 3.11** (per the owner,
+  2026-11-10), so anything up to 3.11 is fine. The existing code uses `%`
+  formatting and `universal_newlines=True` out of habit, not need. Match the
+  style around an edit, but don't keep it on account of old devices.
 - Output uses the `ok()` / `bad()` / `info()` / `heading()` helpers. Messages
   say what happened *and what to do about it* (for example "pass --force to
   replace it").
