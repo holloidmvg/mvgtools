@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Claude Code: personal notes and settings, not shared
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Editors
+*.swp
+*~
+.vscode/
+.idea/
