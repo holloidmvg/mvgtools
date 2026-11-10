@@ -58,7 +58,7 @@ These must stay in step with holo-control. When one of them changes there,
   replace it").
 - Comments and docstrings explain *why*, in plain sentences.
 - Exit codes: 0 ok, 1 failed, 2 layout unknown or conflicting.
-- **Tests:** `python3 -m unittest test_holo_service`. pytest is not installed.
+- **Tests:** `python3 -m unittest test_holo_service test_proto_switch`. pytest is not installed.
   Run the tests after every change to `holo_service.py`. Fixtures in
   `testdata/` are real (or reconstructed) device logs. Add one when you fix a
   diagnosis that a real log got wrong.

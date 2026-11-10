@@ -7,6 +7,8 @@ software, kept outside `holo-control` so they never mix with its history.
 |---|---|
 | [`holo_service.py`](holo_service.py) | Stop, restart, check, configure and install the device software on a device |
 | [`test_holo_service.py`](test_holo_service.py) | Unit tests for `holo_service.py`, run against the logs in [`testdata/`](testdata) |
+| [`proto_switch.py`](proto_switch.py) | Switch a device between its own identity and the prototype (uninitialised) one |
+| [`test_proto_switch.py`](test_proto_switch.py) | Unit tests for `proto_switch.py`, run on a scratch tree laid out like a device |
 | [`fixgeany.py`](fixgeany.py) | Sets up the Geany editor the way I like it (font, colours, keybindings) |
 
 Everything uses only the Python standard library.
@@ -163,6 +165,68 @@ The fixtures are real starts from 2026-10-22 on `hm-2p99`:
   pump configured without pins (rebuilt from the tool's output).
 - `testdata/log_started_no_igor_reply.log`: a start that passed every check
   while the Igor did not answer (as logged).
+
+---
+
+## proto_switch.py
+
+Switches a device between its own configuration ("main") and the prototype
+one, in which it identifies as an uninitialised device. It is independent of
+the device software and does not stop or start it.
+
+```
+sudo proto_switch.py record [--force]
+sudo proto_switch.py proto  [--force] [--no-reload]
+sudo proto_switch.py main   [--force] [--no-reload]
+sudo proto_switch.py status
+```
+
+| | main | proto |
+|---|---|---|
+| `/etc/ssh/ssh_host*key*` | as recorded | unpacked from `/etc/ssh/proto_keys.tar`; other host keys removed |
+| `/etc/holloid/deployment.json` | as recorded | `{}` |
+| `/etc/holloid/configuration.json` | as recorded: file, symlink or absent | absent |
+| `/etc/holloid/tailoring.json` | as recorded: file, symlink or absent | absent |
+| `~mage/.ssh/authorized_keys` | as recorded | a copy of `~mage/.ssh/fresh_keys` |
+
+A symlink is recorded and restored as a link. Its target is never touched.
+
+#### `record`
+Saves the live main configuration in `/var/backups/holloid-main` (root
+only, because it holds private host keys): copies of the files, plus a
+`manifest.json` with each file's hash, mode and owner, or a link's target.
+The backup before it is kept as `holloid-main.previous`. Run it again
+whenever the main configuration changes. It refuses while the device is in
+the prototype state, or while the live host keys are the prototype ones,
+because that would overwrite the main backup with the prototype.
+
+#### `proto` and `main`
+Everything is checked before anything is changed: the recording exists and
+is intact, `proto_keys.tar` holds only `ssh_host*key*` files, and
+`fresh_keys` exists and is not empty. While the device is in the main state,
+both commands also refuse if the live files changed since `record`, because
+switching would lose those changes. Run `record` to keep them, or pass
+`--force` to discard them.
+
+`authorized_keys` is switched last. Afterwards `sshd -t` checks the result and
+sshd is reloaded, so it serves the new host keys. Open sessions stay up.
+Clients that knew the other host key will warn that it changed:
+`ssh-keygen -R <host>` on the client forgets the old one.
+
+A switch that is interrupted leaves the state as `partial`. Running `main` or
+`proto` again finishes it.
+
+#### `status`
+Shows when the recording was made, which state is active, whether the live
+host keys are the prototype ones and, in the main state, what has changed
+since `record`.
+
+Exit codes: `0` success · `1` failed · `2` refused before anything was
+changed.
+
+```
+python3 -m unittest test_proto_switch
+```
 
 ---
 
